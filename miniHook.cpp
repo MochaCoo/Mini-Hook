@@ -44,7 +44,7 @@ miniHook::miniHook()
 {
 	this->HookAddr = NULL;
 	this->len = 0;
-	this->HookFunc = NULL;
+	this->NewFunc = NULL;
 	this->Bridge = NULL;
 }
 
@@ -56,12 +56,13 @@ miniHook::miniHook(void* Addr, void* NewFunc, BOOL Start)
 void* miniHook::Set(void* Addr, void* NewFunc, BOOL Start)
 {
 	this->~miniHook();
+
 	ldasm_data ld = { 0 };
 	size_t l = 0;
 	DWORD op;
 	this->HookAddr = Addr;
-	this->HookFunc = NewFunc;
-	if (VirtualProtect(Addr, 16, PAGE_READWRITE, &op) == FALSE)
+	this->NewFunc = NewFunc;
+	if (VirtualProtect(Addr, 16, PAGE_EXECUTE_READWRITE, &op) == FALSE)//hook内部函数时,设置内存属性可能会覆盖到正在执行的代码段,所以不能仅仅设置为PAGE_READWRITE
 		return NULL;
 
 	do {
@@ -70,38 +71,49 @@ void* miniHook::Set(void* Addr, void* NewFunc, BOOL Start)
 			return NULL;
 	} while (l < 5);
 	this->len = l;
+
 #ifdef _WIN64
-	this->Bridge = this->AllocAt(Addr, l + 5 + 14);//FF 25 00 00 00 00
+	const char fj[] = { 0xff,0x25,0,0,0,0 };//far jmp
+	this->Bridge = this->AllocAt(Addr, l + 5 + sizeof(fj) + sizeof(ULONG_PTR));
 	//printf("\nBridge:%p\n", this->Bridge);
 	if (this->Bridge == NULL)
 		return NULL;
 
-	memcpy((void*)this->Bridge, Addr, l);
-	ULONG_PTR offset5jmp = (ULONG_PTR)this->Bridge + l;//E9 jmp 偏移
-	*(char*)offset5jmp = 0xE9;
+	memcpy((void*)this->Bridge, Addr, l);//拷贝因为HOOK被覆盖的指令
+
+	ULONG_PTR offset5jmp = (ULONG_PTR)this->Bridge + l;
+	*(char*)offset5jmp = 0xE9;//拷贝过来的指令后面添加jmp原函数(E9 +-2G偏移)
 	*(DWORD*)(offset5jmp + 1) = ((ULONG_PTR)Addr + l) - ((offset5jmp) + 5);
 
-	const char fj[] = { 0xff,0x25,0,0,0,0 };
-	memcpy((void*)(offset5jmp + 5), fj, sizeof(fj));
-	*(ULONG_PTR*)(offset5jmp + 5 + 6) = (ULONG_PTR)NewFunc;
-
-	if (Start) {
-		*(char*)Addr = 0xE9;
-		*(DWORD*)((ULONG_PTR)Addr + 1) = (offset5jmp + 5) - ((ULONG_PTR)(Addr)+5);
+	long long offset = ((ULONG_PTR)NewFunc) - ((ULONG_PTR)(Addr)+5);//计算New和HookAddr的偏移
+	if ((signed int)0x80000000 <= offset && offset <= (signed int)0x7FFFFFFF) {
+		if (Start) {
+			*(char*)Addr = 0xE9;//+-2G范围内 直接E9 jmp
+			*(DWORD*)((ULONG_PTR)Addr + 1) = offset;
+		}
 	}
+	else {
+		memcpy((void*)(offset5jmp + 5), fj, sizeof(fj));//原指令 + jmp原函数 + far jmp NewFunc
+		*(ULONG_PTR*)(offset5jmp + 5 + sizeof(fj)) = (ULONG_PTR)NewFunc;
+		if (Start) {
+			*(char*)Addr = 0xE9;
+			*(DWORD*)((ULONG_PTR)Addr + 1) = (offset5jmp + 5) - ((ULONG_PTR)(Addr)+5);
+		}
+	}
+
 	DWORD op1;
 	if (VirtualProtect(Addr, 16, op, &op1) == FALSE)
 		return NULL;
-	if (VirtualProtect(this->Bridge, l + 5 + 14, PAGE_EXECUTE_READ, &op1) == FALSE)
+	if (VirtualProtect(this->Bridge, l + 5 + sizeof(fj) + sizeof(ULONG_PTR), PAGE_EXECUTE_READ, &op1) == FALSE)
 		return NULL;
 #else
 	this->Bridge = VirtualAlloc(NULL, l + 5, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
 
 	if (this->Bridge == NULL)
 		return NULL;
-	memcpy((void*)this->Bridge, Addr, l);
+	memcpy((void*)this->Bridge, Addr, l);//拷贝因为HOOK被覆盖的指令
 
-	ULONG_PTR offset5jmp = (ULONG_PTR)this->Bridge + l;//E9 jmp
+	ULONG_PTR offset5jmp = (ULONG_PTR)this->Bridge + l;//拷贝过来的指令后面添加jmp原函数
 	*(char*)offset5jmp = 0xE9;
 	*(ULONG_PTR*)(offset5jmp + 1) = ((ULONG_PTR)Addr + l) - ((offset5jmp)+5);
 
@@ -111,27 +123,31 @@ void* miniHook::Set(void* Addr, void* NewFunc, BOOL Start)
 	}
 
 	DWORD op1;
-	if (VirtualProtect(Addr, 5, op, &op1) == FALSE)
+	if (VirtualProtect(Addr, 16, op, &op1) == FALSE)
 		return NULL;
 	if (VirtualProtect(this->Bridge, l + 5, PAGE_EXECUTE_READ, &op1) == FALSE)
 		return NULL;
 #endif
-	return (void*)((ULONG_PTR)this->Bridge);
+	return this->Bridge;
 }
 
 BOOL miniHook::Start()
 {
-	if (this->HookAddr == NULL || this->Bridge == NULL || this->HookFunc == NULL || this->len == 0)
+	if (this->HookAddr == NULL || this->Bridge == NULL || this->NewFunc == NULL || this->len == 0)
 		return false;
 
 	DWORD op;
-	if (VirtualProtect(this->HookAddr, 5, PAGE_READWRITE, &op) == FALSE)
+	if (VirtualProtect(this->HookAddr, 5, PAGE_EXECUTE_READWRITE, &op) == FALSE)
 		return false;
 	*(char*)this->HookAddr = 0xE9;
 #ifdef _WIN64
-	* (DWORD*)((ULONG_PTR)this->HookAddr + 1) = ((ULONG_PTR)this->Bridge + this->len + 5) - ((ULONG_PTR)(this->HookAddr) + 5);
+	long long offset = ((ULONG_PTR)this->NewFunc) - (((ULONG_PTR)this->HookAddr) + 5);
+	if ((signed int)0x80000000 <= offset && offset <= (signed int)0x7FFFFFFF)
+		*(DWORD*)((ULONG_PTR)this->HookAddr + 1) = offset;
+	else
+		*(DWORD*)((ULONG_PTR)this->HookAddr + 1) = ((ULONG_PTR)this->Bridge + this->len + 5) - ((ULONG_PTR)(this->HookAddr) + 5);
 #else
-	* (DWORD*)((ULONG_PTR)this->HookAddr + 1) = ((ULONG_PTR)this->HookFunc) - ((ULONG_PTR)(this->HookAddr) + 5);
+	* (DWORD*)((ULONG_PTR)this->HookAddr + 1) = ((ULONG_PTR)this->NewFunc) - ((ULONG_PTR)(this->HookAddr) + 5);
 #endif
 	DWORD op1;
 	if (VirtualProtect(this->HookAddr, 5, op, &op1) == FALSE)
@@ -145,7 +161,7 @@ BOOL miniHook::Stop()
 		return false;
 
 	DWORD op;
-	if (VirtualProtect(this->HookAddr, 5, PAGE_READWRITE, &op) == FALSE)
+	if (VirtualProtect(this->HookAddr, 5, PAGE_EXECUTE_READWRITE, &op) == FALSE)
 		return false;
 	memcpy(this->HookAddr, this->Bridge, 5);//this->l
 
