@@ -213,9 +213,9 @@ static unsigned char flags_table[256] =
     /* 9E */    OP_NONE,
     /* 9F */    OP_NONE,
     
-    /* A0 */    OP_DATA_I8,
+    /* A0 */    OP_DATA_I16_I32_I64, // OP_DATA_I8
     /* A1 */    OP_DATA_I16_I32_I64,
-    /* A2 */    OP_DATA_I8,
+    /* A2 */    OP_DATA_I16_I32_I64, // OP_DATA_I8
     /* A3 */    OP_DATA_I16_I32_I64,
     /* A4 */    OP_NONE,
     /* A5 */    OP_NONE,
@@ -748,9 +748,9 @@ unsigned int __stdcall ldasm( void *code, ldasm_data *ld, uint32_t is64 )
     }
     
     /* phase 4: parse immediate data */
-    if (rexw && f & OP_DATA_I16_I32_I64)
+    if ((rexw || (is64 && op >= 0xA0 && op <= 0xA3)) && f & OP_DATA_I16_I32_I64)
         ld->imm_size = 8;
-    else if (f & OP_DATA_I16_I32 || f & OP_DATA_I16_I32_I64) 
+    else if (f & OP_DATA_I16_I32 || f & OP_DATA_I16_I32_I64)
         ld->imm_size = 4 - (pr_66 << 1);
     
     /* if exist, add OP_DATA_I16 and OP_DATA_I8 size */

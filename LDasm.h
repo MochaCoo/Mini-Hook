@@ -17,7 +17,7 @@ extern "C"
 
 #define F_INVALID       0x01
 #define F_PREFIX        0x02 //指令前缀 rep lock
-#define F_REX           0x04
+#define F_REX           0x04 //x64指令前缀
 #define F_MODRM         0x08
 #define F_SIB           0x10
 #define F_DISP          0x20 //mov eax,[eax+ecx*4+0x1234]
